@@ -21,6 +21,13 @@ DEFAULT_STAGE_WEIGHTS = {
 }
 
 
+BERTSCORE_ARTIFACTS = {
+    AgentRole.REQUIREMENTS_ANALYST: ("docs/requirements.md", "requirements_file"),
+    AgentRole.ARCHITECT: ("docs/architecture.md", "architecture_file"),
+    AgentRole.IMPLEMENTATION_PLANNER: ("docs/implementation_plan.md", "implementation_plan_file"),
+}
+
+
 class ValidationScore(BaseModel):
     stage: str
     metric: str
@@ -57,8 +64,10 @@ class StageValidator:
 
     def validate_stage(self, stage: Any) -> list[ValidationScore]:
         scores = [self._expected_artifacts_score(stage)]
-        if stage.role == AgentRole.REQUIREMENTS_ANALYST:
-            scores.append(self._requirements_bertscore(stage))
+        bertscore_config = BERTSCORE_ARTIFACTS.get(stage.role)
+        if bertscore_config:
+            candidate_file, reference_key = bertscore_config
+            scores.append(self._artifact_bertscore(stage, candidate_file, reference_key))
         return scores
 
     def summarize(self, scores: list[ValidationScore]) -> ValidationSummary:
@@ -184,11 +193,12 @@ class StageValidator:
             details={"present": present, "missing": missing},
         )
 
-    def _requirements_bertscore(self, stage: Any) -> ValidationScore:
-        candidate_path = self.workspace.resolve("docs/requirements.md")
-        reference_path = self._reference_path("requirements_file")
+    def _artifact_bertscore(self, stage: Any, candidate_file: str, reference_key: str) -> ValidationScore:
+        candidate_path = self.workspace.resolve(candidate_file)
+        reference_path = self._reference_path(reference_key)
         details: dict[str, Any] = {
             "candidate_file": candidate_path.relative_to(self.workspace.root).as_posix(),
+            "reference_key": reference_key,
             "reference_file": str(reference_path) if reference_path else None,
         }
 
