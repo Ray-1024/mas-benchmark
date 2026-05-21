@@ -52,3 +52,5 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+run/
