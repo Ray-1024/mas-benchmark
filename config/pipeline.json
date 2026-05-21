@@ -1,0 +1,11 @@
+{
+    "stages":[
+        {
+            "order": 0,
+            "required_artifacts": [],
+            "artifacts": [],
+            "agent": "",
+            "prompt"
+        }
+    ]
+}

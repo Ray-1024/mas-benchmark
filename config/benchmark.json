@@ -1,0 +1,13 @@
+{
+    "benchmarks": [
+        {
+            "id": "task-tracker",
+            "benchmark_type": "feature",
+            "reference_response": {
+                "architecture_file": "",
+                "implementation_plan_file": "",
+                "requirements_file": ""
+            }
+        }
+    ]
+}
