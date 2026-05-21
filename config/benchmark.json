@@ -5,9 +5,9 @@
             "benchmark_type": "feature",
             "prompt": "You are Python developer. Create FastAPI web application to task management on Kanban board",
             "reference_response": {
-                "architecture_file": "benchmarks/task-tracker/docs/architecture.md",
-                "implementation_plan_file": "benchmarks/task-tracker/docs/implementation_plan.md",
-                "requirements_file": "benchmarks/task-tracker/docs/requirements.md"
+                "architecture_file": "benchmark/task-tracker/docs/architecture.md",
+                "implementation_plan_file": "benchmark/task-tracker/docs/implementation_plan.md",
+                "requirements_file": "benchmark/task-tracker/docs/requirements.md"
             }
         }
     ]

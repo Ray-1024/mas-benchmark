@@ -92,7 +92,13 @@ def run_benchmark(
     stages = select_stages(None if args.all_stages else args.stage)
     task = read_task(args.task, args.task_file) or benchmark_task(benchmark, workspace.root)
 
-    pipeline = LangGraphPipeline(runner=runner, workspace=workspace, agents=agents, stages=stages)
+    pipeline = LangGraphPipeline(
+        runner=runner,
+        workspace=workspace,
+        agents=agents,
+        stages=stages,
+        validation_references=resolve_reference_files(benchmark),
+    )
     state = pipeline.run(task=task, run_id=run_id)
 
     print(f"benchmark={benchmark_id}")
@@ -100,6 +106,7 @@ def run_benchmark(
     print(f"workspace={workspace.root}")
     print(f"completed_stages={','.join(state.completed_stages)}")
     print(f"artifact_manifest={workspace.resolve('.mas/artifact_manifest.json')}")
+    print(f"final_report={workspace.resolve('.mas/final_report.md')}")
 
 
 def run_single_agent_brief(
@@ -230,6 +237,28 @@ def benchmark_task(benchmark: dict[str, Any], workspace_root: Path) -> str:
     if not docs:
         return header
     return f"{header}\n\nUse these benchmark artifacts as the initial task context:\n\n" + "\n\n".join(docs)
+
+
+def resolve_reference_files(benchmark: dict[str, Any]) -> dict[str, Path]:
+    references = benchmark.get("reference_response", {})
+    return {
+        key: resolve_project_path(value)
+        for key, value in references.items()
+        if value
+    }
+
+
+def resolve_project_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    candidates = [PROJECT_ROOT / path]
+    if path.parts and path.parts[0] == "benchmarks":
+        candidates.append(PROJECT_ROOT / "benchmark" / Path(*path.parts[1:]))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
 
 
 def read_task(text: str | None, file_path: Path | None) -> str | None:
