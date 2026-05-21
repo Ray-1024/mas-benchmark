@@ -3,6 +3,7 @@
         {
             "id": "task-tracker",
             "benchmark_type": "feature",
+            "prompt": "You are Python developer. Create FastAPI web application to task management on Kanban board",
             "reference_response": {
                 "architecture_file": "",
                 "implementation_plan_file": "",
