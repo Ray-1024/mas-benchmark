@@ -1,0 +1,12 @@
+services:
+  mas-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mas-benchmark:latest
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: ["--help"]
