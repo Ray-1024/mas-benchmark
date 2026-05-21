@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from a2a_message import A2AMessage, MessageType
 from agent import AgentDefinition, AgentRole
 from runner import OpenhandsRunner
+from stage_validator import StageScore, StageValidator, ValidationScore, ValidationSummary
 from tools import new_uuid, utc_now
 from workspace import WorkspaceManager
 
@@ -43,14 +44,6 @@ class FileChange(BaseModel):
     artifact_path: str | None = None
 
 
-class ValidationScore(BaseModel):
-    stage: str
-    metric: str
-    score: float | None = None
-    status: str
-    details: dict[str, Any] = Field(default_factory=dict)
-
-
 class StageArtifact(BaseModel):
     stage: str
     agent: str
@@ -59,6 +52,7 @@ class StageArtifact(BaseModel):
     after_snapshot_path: str
     changed_files: list[FileChange] = Field(default_factory=list)
     validation_scores: list[ValidationScore] = Field(default_factory=list)
+    stage_score: StageScore | None = None
     manifest_path: str
 
 
@@ -79,6 +73,7 @@ class PipelineState(BaseModel):
     snapshots: list[WorkspaceSnapshot] = Field(default_factory=list)
     artifacts: list[StageArtifact] = Field(default_factory=list)
     validation_scores: list[ValidationScore] = Field(default_factory=list)
+    validation_summary: ValidationSummary | None = None
     completed_stages: list[str] = Field(default_factory=list)
 
 
@@ -148,7 +143,10 @@ class LangGraphPipeline:
         self.workspace = workspace
         self.agents = agents or default_agent_definitions()
         self.stages = stages or DEFAULT_STAGES
-        self.validation_references = validation_references or {}
+        self.stage_validator = StageValidator(
+            workspace=workspace,
+            validation_references=validation_references,
+        )
         self.sender = sender
         self.app = self._build_graph()
 
@@ -199,7 +197,8 @@ class LangGraphPipeline:
         self.runner.run_task(agent, self._task_for_stage(state, stage, request))
 
         after = self._snapshot_workspace(stage_name, "after", state.run_id)
-        validation_scores = self._validate_stage(stage)
+        validation_scores = self.stage_validator.validate_stage(stage)
+        stage_score = self.stage_validator.summarize_stage(stage_name, validation_scores)
         artifact = self._save_changed_files(
             run_id=state.run_id,
             stage=stage,
@@ -208,6 +207,7 @@ class LangGraphPipeline:
             before=before,
             after=after,
             validation_scores=validation_scores,
+            stage_score=stage_score,
         )
 
         state.messages.append(request)
@@ -215,7 +215,12 @@ class LangGraphPipeline:
         state.artifacts.append(artifact)
         state.validation_scores.extend(validation_scores)
         state.completed_stages.append(stage_name)
-        self._write_final_report(state)
+        state.validation_summary = self.stage_validator.write_final_report(
+            run_id=state.run_id,
+            completed_stages=state.completed_stages,
+            validation_scores=state.validation_scores,
+            artifacts=state.artifacts,
+        )
         return state.model_dump(mode="python")
 
     def _coerce_state(self, state: PipelineState | dict[str, Any]) -> PipelineState:
@@ -295,6 +300,7 @@ class LangGraphPipeline:
         before: WorkspaceSnapshot,
         after: WorkspaceSnapshot,
         validation_scores: list[ValidationScore],
+        stage_score: StageScore,
     ) -> StageArtifact:
         stage_dir = self._artifacts_dir(run_id) / stage.role.value
         changed_files_dir = stage_dir / "changed_files"
@@ -323,154 +329,12 @@ class LangGraphPipeline:
             .as_posix(),
             changed_files=changes,
             validation_scores=validation_scores,
+            stage_score=stage_score,
             manifest_path=manifest_path.relative_to(self.workspace.root).as_posix(),
         )
         self._write_json(manifest_path, artifact.model_dump(mode="json"))
         self._write_root_artifact_manifest(run_id)
         return artifact
-
-    def _validate_stage(self, stage: PipelineStage) -> list[ValidationScore]:
-        scores = [self._expected_artifacts_score(stage)]
-        if stage.role == AgentRole.REQUIREMENTS_ANALYST:
-            scores.append(self._requirements_bertscore(stage))
-        return scores
-
-    def _expected_artifacts_score(self, stage: PipelineStage) -> ValidationScore:
-        expected = stage.expected_artifacts
-        if not expected:
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="expected_artifacts",
-                score=None,
-                status="skipped",
-                details={"reason": "stage has no expected artifacts"},
-            )
-
-        present = [path for path in expected if self.workspace.resolve(path).exists()]
-        missing = sorted(set(expected) - set(present))
-        return ValidationScore(
-            stage=stage.role.value,
-            metric="expected_artifacts",
-            score=len(present) / len(expected),
-            status="passed" if not missing else "failed",
-            details={"present": present, "missing": missing},
-        )
-
-    def _requirements_bertscore(self, stage: PipelineStage) -> ValidationScore:
-        candidate_path = self.workspace.resolve("docs/requirements.md")
-        reference_path = self._reference_path("requirements_file")
-        details: dict[str, Any] = {
-            "candidate_file": candidate_path.relative_to(self.workspace.root).as_posix(),
-            "reference_file": str(reference_path) if reference_path else None,
-        }
-
-        if reference_path is None or not reference_path.exists():
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=None,
-                status="missing_reference",
-                details=details,
-            )
-        if not candidate_path.exists():
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=0.0,
-                status="missing_candidate",
-                details=details,
-            )
-
-        try:
-            from bert_score import score as bert_score
-
-            precision, recall, f1 = bert_score(
-                [candidate_path.read_text(encoding="utf-8")],
-                [reference_path.read_text(encoding="utf-8")],
-                lang="en",
-                verbose=False,
-            )
-            precision_value = float(precision.mean().item())
-            recall_value = float(recall.mean().item())
-            f1_value = float(f1.mean().item())
-            details.update({"precision": precision_value, "recall": recall_value})
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=f1_value,
-                status="passed",
-                details=details,
-            )
-        except Exception as exc:
-            details["error"] = str(exc)
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=None,
-                status="error",
-                details=details,
-            )
-
-    def _reference_path(self, key: str) -> Path | None:
-        raw_path = self.validation_references.get(key)
-        if raw_path is None:
-            return None
-        path = Path(raw_path)
-        if path.is_absolute():
-            return path
-
-        candidates = [
-            Path.cwd() / path,
-            self.workspace.root.parent.parent.parent / path,
-            self.workspace.root / path,
-        ]
-        if path.parts and path.parts[0] == "benchmarks":
-            candidates.append(Path.cwd() / "benchmark" / Path(*path.parts[1:]))
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate.resolve()
-        return candidates[0].resolve()
-
-    def _write_final_report(self, state: PipelineState) -> None:
-        report_path = self.workspace.resolve(".mas/final_report.md")
-        lines = [
-            "# Final Report",
-            "",
-            f"- Run ID: `{state.run_id}`",
-            f"- Completed stages: {len(state.completed_stages)}",
-            "",
-            "## Stage Scores",
-            "",
-            "| Stage | Metric | Score | Status | Details |",
-            "| --- | --- | ---: | --- | --- |",
-        ]
-        for score in state.validation_scores:
-            score_text = "n/a" if score.score is None else f"{score.score:.4f}"
-            detail_text = self._markdown_table_cell(json.dumps(score.details, ensure_ascii=False))
-            lines.append(
-                "| "
-                f"{self._markdown_table_cell(score.stage)} | "
-                f"{self._markdown_table_cell(score.metric)} | "
-                f"{score_text} | "
-                f"{self._markdown_table_cell(score.status)} | "
-                f"`{detail_text}` |"
-            )
-
-        lines.extend(
-            [
-                "",
-                "## Artifacts",
-                "",
-            ]
-        )
-        for artifact in state.artifacts:
-            lines.append(f"- `{artifact.stage}`: `{artifact.manifest_path}`")
-
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def _markdown_table_cell(self, value: str) -> str:
-        return value.replace("|", "\\|").replace("\n", " ")
 
     def _diff_snapshots(
         self,

@@ -105,6 +105,8 @@ def run_benchmark(
     print(f"run_id={state.run_id}")
     print(f"workspace={workspace.root}")
     print(f"completed_stages={','.join(state.completed_stages)}")
+    if state.validation_summary and state.validation_summary.weighted_score is not None:
+        print(f"weighted_score={state.validation_summary.weighted_score:.4f}")
     print(f"artifact_manifest={workspace.resolve('.mas/artifact_manifest.json')}")
     print(f"final_report={workspace.resolve('.mas/final_report.md')}")
 
