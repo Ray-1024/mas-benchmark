@@ -241,13 +241,17 @@ def benchmark_task(benchmark: dict[str, Any], workspace_root: Path) -> str:
     return f"{header}\n\nUse these benchmark artifacts as the initial task context:\n\n" + "\n\n".join(docs)
 
 
-def resolve_reference_files(benchmark: dict[str, Any]) -> dict[str, Path]:
+def resolve_reference_files(benchmark: dict[str, Any]) -> dict[str, Any]:
     references = benchmark.get("reference_response", {})
-    return {
+    resolved: dict[str, Any] = {
         key: resolve_project_path(value)
         for key, value in references.items()
         if value
     }
+    swebench_config = benchmark.get("swebench") or benchmark.get("swe_bench")
+    if swebench_config:
+        resolved["swebench"] = swebench_config
+    return resolved
 
 
 def resolve_project_path(value: str) -> Path:

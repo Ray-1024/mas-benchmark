@@ -8,6 +8,13 @@
                 "architecture_file": "benchmark/task-tracker/docs/architecture.md",
                 "implementation_plan_file": "benchmark/task-tracker/docs/implementation_plan.md",
                 "requirements_file": "benchmark/task-tracker/docs/requirements.md"
+            },
+            "swebench": {
+                "enabled": false,
+                "instance_id": "",
+                "dataset_name": "princeton-nlp/SWE-bench_Lite",
+                "split": "test",
+                "max_workers": 1
             }
         }
     ]

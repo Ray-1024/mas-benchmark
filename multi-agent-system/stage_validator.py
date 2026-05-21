@@ -68,6 +68,8 @@ class StageValidator:
         if bertscore_config:
             candidate_file, reference_key = bertscore_config
             scores.append(self._artifact_bertscore(stage, candidate_file, reference_key))
+        if stage.role == AgentRole.DEVELOPER:
+            scores.append(self._swebench_score(stage))
         return scores
 
     def summarize(self, scores: list[ValidationScore]) -> ValidationSummary:
@@ -247,6 +249,38 @@ class StageValidator:
                 score=None,
                 status="error",
                 details=details,
+            )
+
+    def _swebench_score(self, stage: Any) -> ValidationScore:
+        swebench_config = self.validation_references.get("swebench") or self.validation_references.get("swe_bench")
+        if not swebench_config:
+            return ValidationScore(
+                stage=stage.role.value,
+                metric="swebench_resolved",
+                score=None,
+                status="skipped",
+                details={"reason": "SWE-Bench config is not provided"},
+            )
+
+        try:
+            from swebench import SWEBenchConfig, SWEBenchRunner
+
+            config = SWEBenchConfig.model_validate(swebench_config)
+            result = SWEBenchRunner(config).run(self.workspace.root)
+            return ValidationScore(
+                stage=stage.role.value,
+                metric="swebench_resolved",
+                score=result.score,
+                status=result.status,
+                details=result.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            return ValidationScore(
+                stage=stage.role.value,
+                metric="swebench_resolved",
+                score=None,
+                status="error",
+                details={"error": str(exc)},
             )
 
     def _reference_path(self, key: str) -> Path | None:
