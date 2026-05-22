@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from agent import AgentRole
+from bertscore import BertScoreValidator
 from workspace import WorkspaceManager
 
 
@@ -18,13 +19,6 @@ DEFAULT_STAGE_WEIGHTS = {
     AgentRole.TEST_ENGINEER.value: 0.15,
     AgentRole.DEFECT_REPAIRER.value: 0.05,
     AgentRole.RELEASE_MANAGER.value: 0.05,
-}
-
-
-BERTSCORE_ARTIFACTS = {
-    AgentRole.REQUIREMENTS_ANALYST: ("docs/requirements.md", "requirements_file"),
-    AgentRole.ARCHITECT: ("docs/architecture.md", "architecture_file"),
-    AgentRole.IMPLEMENTATION_PLANNER: ("docs/implementation_plan.md", "implementation_plan_file"),
 }
 
 
@@ -61,13 +55,16 @@ class StageValidator:
         self.workspace = workspace
         self.validation_references = validation_references or {}
         self.stage_weights = stage_weights or DEFAULT_STAGE_WEIGHTS
+        self.bertscore_validator = BertScoreValidator(
+            workspace=workspace,
+            validation_references=self.validation_references,
+        )
 
     def validate_stage(self, stage: Any) -> list[ValidationScore]:
         scores = [self._expected_artifacts_score(stage)]
-        bertscore_config = BERTSCORE_ARTIFACTS.get(stage.role)
-        if bertscore_config:
-            candidate_file, reference_key = bertscore_config
-            scores.append(self._artifact_bertscore(stage, candidate_file, reference_key))
+        bertscore_score = self.bertscore_validator.validate_stage(stage)
+        if bertscore_score is not None:
+            scores.append(ValidationScore.model_validate(bertscore_score))
         if stage.role == AgentRole.DEVELOPER:
             scores.append(self._swebench_score(stage))
         return scores
@@ -199,62 +196,6 @@ class StageValidator:
             details={"present": present, "missing": missing},
         )
 
-    def _artifact_bertscore(self, stage: Any, candidate_file: str, reference_key: str) -> ValidationScore:
-        candidate_path = self.workspace.resolve(candidate_file)
-        reference_path = self._reference_path(reference_key)
-        details: dict[str, Any] = {
-            "candidate_file": candidate_path.relative_to(self.workspace.root).as_posix(),
-            "reference_key": reference_key,
-            "reference_file": str(reference_path) if reference_path else None,
-        }
-
-        if reference_path is None or not reference_path.exists():
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=None,
-                status="missing_reference",
-                details=details,
-            )
-        if not candidate_path.exists():
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=0.0,
-                status="missing_candidate",
-                details=details,
-            )
-
-        try:
-            from bert_score import score as bert_score
-
-            precision, recall, f1 = bert_score(
-                [candidate_path.read_text(encoding="utf-8")],
-                [reference_path.read_text(encoding="utf-8")],
-                lang="en",
-                verbose=False,
-            )
-            precision_value = float(precision.mean().item())
-            recall_value = float(recall.mean().item())
-            f1_value = float(f1.mean().item())
-            details.update({"precision": precision_value, "recall": recall_value})
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=f1_value,
-                status="passed",
-                details=details,
-            )
-        except Exception as exc:
-            details["error"] = str(exc)
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="bertscore_f1",
-                score=None,
-                status="error",
-                details=details,
-            )
-
     def _swebench_score(self, stage: Any) -> ValidationScore:
         swebench_config = self.validation_references.get("swebench") or self.validation_references.get("swe_bench")
         if not swebench_config:
@@ -286,26 +227,6 @@ class StageValidator:
                 status="error",
                 details={"error": str(exc)},
             )
-
-    def _reference_path(self, key: str) -> Path | None:
-        raw_path = self.validation_references.get(key)
-        if raw_path is None:
-            return None
-        path = Path(raw_path)
-        if path.is_absolute():
-            return path
-
-        candidates = [
-            Path.cwd() / path,
-            self.workspace.root.parent.parent.parent / path,
-            self.workspace.root / path,
-        ]
-        if path.parts and path.parts[0] == "benchmarks":
-            candidates.append(Path.cwd() / "benchmark" / Path(*path.parts[1:]))
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate.resolve()
-        return candidates[0].resolve()
 
     def _score_text(self, score: float | None) -> str:
         return "n/a" if score is None else f"{score:.4f}"
