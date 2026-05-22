@@ -16,7 +16,6 @@ class MessageType(str, Enum):
     HANDOFF = "handoff"
 
 class A2AMessage(BaseModel):
-    protocol: str = "a2a/0.1"
     message_id: str = Field(default_factory=tools.new_id)
     thread_id: str = Field(default_factory=tools.new_id)
     parent_message_id: str | None = None

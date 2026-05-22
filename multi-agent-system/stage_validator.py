@@ -149,7 +149,11 @@ class StageValidator:
 
         lines.extend(["", "## Artifacts", ""])
         for artifact in artifacts:
-            lines.append(f"- `{artifact.stage}`: `{artifact.manifest_path}`")
+            artifact_id = getattr(artifact, "message_id", "unknown")
+            description = getattr(artifact, "description", "")
+            hash_value = getattr(artifact, "hash", "")
+            label = description or artifact_id
+            lines.append(f"- `{self._markdown_table_cell(label)}`: `{artifact_id}` (`{hash_value}`)")
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

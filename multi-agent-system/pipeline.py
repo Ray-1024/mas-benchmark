@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,48 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from a2a_message import A2AMessage, MessageType
 from agent import AgentDefinition, AgentRole
+from artifact import Artifact, ArtifactRegister
 from runner import OpenhandsRunner
-from stage_validator import StageScore, StageValidator, ValidationScore, ValidationSummary
+from stage_validator import StageValidator, ValidationScore, ValidationSummary
 from tools import new_uuid, utc_now
 from workspace import WorkspaceManager
-
-
-IGNORED_DIRS = {".git", ".mas", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-
-
-class FileSnapshotEntry(BaseModel):
-    path: str
-    sha256: str
-    size_bytes: int
-    modified_at: datetime
-
-
-class WorkspaceSnapshot(BaseModel):
-    snapshot_id: str = Field(default_factory=new_uuid)
-    stage: str
-    phase: str
-    created_at: datetime = Field(default_factory=utc_now)
-    files: dict[str, FileSnapshotEntry] = Field(default_factory=dict)
-
-
-class FileChange(BaseModel):
-    path: str
-    change_type: str
-    before_sha256: str | None = None
-    after_sha256: str | None = None
-    artifact_path: str | None = None
-
-
-class StageArtifact(BaseModel):
-    stage: str
-    agent: str
-    request_message_id: str
-    before_snapshot_path: str
-    after_snapshot_path: str
-    changed_files: list[FileChange] = Field(default_factory=list)
-    validation_scores: list[ValidationScore] = Field(default_factory=list)
-    stage_score: StageScore | None = None
-    manifest_path: str
 
 
 class PipelineStage(BaseModel):
@@ -70,8 +30,8 @@ class PipelineState(BaseModel):
     workspace_root: Path
     run_id: str = Field(default_factory=new_uuid)
     messages: list[A2AMessage] = Field(default_factory=list)
-    snapshots: list[WorkspaceSnapshot] = Field(default_factory=list)
-    artifacts: list[StageArtifact] = Field(default_factory=list)
+    snapshots: list[Artifact] = Field(default_factory=list)
+    artifacts: list[Artifact] = Field(default_factory=list)
     validation_scores: list[ValidationScore] = Field(default_factory=list)
     validation_summary: ValidationSummary | None = None
     completed_stages: list[str] = Field(default_factory=list)
@@ -147,6 +107,7 @@ class LangGraphPipeline:
             workspace=workspace,
             validation_references=validation_references,
         )
+        self.artifact_register = ArtifactRegister(workspace.root)
         self.sender = sender
         self.app = self._build_graph()
 
@@ -198,23 +159,13 @@ class LangGraphPipeline:
 
         after = self._snapshot_workspace(stage_name, "after", state.run_id)
         validation_scores = self.stage_validator.validate_stage(stage)
-        stage_score = self.stage_validator.summarize_stage(stage_name, validation_scores)
-        artifact = self._save_changed_files(
-            run_id=state.run_id,
-            stage=stage,
-            agent=agent,
-            request=request,
-            before=before,
-            after=after,
-            validation_scores=validation_scores,
-            stage_score=stage_score,
-        )
 
         state.messages.append(request)
         state.snapshots.extend([before, after])
-        state.artifacts.append(artifact)
+        state.artifacts.append(after)
         state.validation_scores.extend(validation_scores)
         state.completed_stages.append(stage_name)
+        self._write_root_artifact_manifest(state.run_id, state.artifacts, state.snapshots)
         state.validation_summary = self.stage_validator.write_final_report(
             run_id=state.run_id,
             completed_stages=state.completed_stages,
@@ -273,135 +224,29 @@ class LangGraphPipeline:
             "Work inside the current workspace. Preserve unrelated user changes."
         )
 
-    def _snapshot_workspace(self, stage: str, phase: str, run_id: str) -> WorkspaceSnapshot:
-        snapshot = WorkspaceSnapshot(stage=stage, phase=phase)
-        for path in self._iter_workspace_files():
-            relative_path = path.relative_to(self.workspace.root).as_posix()
-            stat = path.stat()
-            snapshot.files[relative_path] = FileSnapshotEntry(
-                path=relative_path,
-                sha256=self._sha256(path),
-                size_bytes=stat.st_size,
-                modified_at=datetime.fromtimestamp(stat.st_mtime).astimezone(),
-            )
-
-        self._write_json(
-            self._snapshot_path(run_id, stage, phase),
-            snapshot.model_dump(mode="json"),
+    def _snapshot_workspace(self, stage: str, phase: str, run_id: str) -> Artifact:
+        return self.artifact_register.snapshot(
+            description=f"run_id={run_id}; stage={stage}; phase={phase}",
         )
-        return snapshot
 
-    def _save_changed_files(
+    def _write_root_artifact_manifest(
         self,
         run_id: str,
-        stage: PipelineStage,
-        agent: AgentDefinition,
-        request: A2AMessage,
-        before: WorkspaceSnapshot,
-        after: WorkspaceSnapshot,
-        validation_scores: list[ValidationScore],
-        stage_score: StageScore,
-    ) -> StageArtifact:
-        stage_dir = self._artifacts_dir(run_id) / stage.role.value
-        changed_files_dir = stage_dir / "changed_files"
-        changed_files_dir.mkdir(parents=True, exist_ok=True)
-
-        changes = self._diff_snapshots(before, after)
-        for change in changes:
-            if change.change_type == "deleted":
-                continue
-            source = self.workspace.resolve(change.path)
-            target = changed_files_dir / change.path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            change.artifact_path = target.relative_to(self.workspace.root).as_posix()
-
-        manifest_path = stage_dir / "manifest.json"
-        artifact = StageArtifact(
-            stage=stage.role.value,
-            agent=agent.name,
-            request_message_id=request.message_id,
-            before_snapshot_path=self._snapshot_path(run_id, stage.role.value, "before")
-            .relative_to(self.workspace.root)
-            .as_posix(),
-            after_snapshot_path=self._snapshot_path(run_id, stage.role.value, "after")
-            .relative_to(self.workspace.root)
-            .as_posix(),
-            changed_files=changes,
-            validation_scores=validation_scores,
-            stage_score=stage_score,
-            manifest_path=manifest_path.relative_to(self.workspace.root).as_posix(),
-        )
-        self._write_json(manifest_path, artifact.model_dump(mode="json"))
-        self._write_root_artifact_manifest(run_id)
-        return artifact
-
-    def _diff_snapshots(
-        self,
-        before: WorkspaceSnapshot,
-        after: WorkspaceSnapshot,
-    ) -> list[FileChange]:
-        changes: list[FileChange] = []
-        all_paths = sorted(set(before.files) | set(after.files))
-        for path in all_paths:
-            before_entry = before.files.get(path)
-            after_entry = after.files.get(path)
-            if before_entry is None and after_entry is not None:
-                changes.append(FileChange(path=path, change_type="added", after_sha256=after_entry.sha256))
-            elif before_entry is not None and after_entry is None:
-                changes.append(FileChange(path=path, change_type="deleted", before_sha256=before_entry.sha256))
-            elif before_entry and after_entry and before_entry.sha256 != after_entry.sha256:
-                changes.append(
-                    FileChange(
-                        path=path,
-                        change_type="modified",
-                        before_sha256=before_entry.sha256,
-                        after_sha256=after_entry.sha256,
-                    )
-                )
-        return changes
-
-    def _write_root_artifact_manifest(self, run_id: str) -> None:
-        artifacts_root = self._artifacts_dir(run_id)
-        manifests = sorted(
-            path.relative_to(self.workspace.root).as_posix()
-            for path in artifacts_root.glob("*/manifest.json")
-        )
+        artifacts: list[Artifact],
+        snapshots: list[Artifact],
+    ) -> None:
         self._write_json(
             self.workspace.resolve(".mas/artifact_manifest.json"),
             {
                 "run_id": run_id,
                 "updated_at": utc_now().isoformat(),
-                "stage_manifests": manifests,
+                "artifacts": [artifact.model_dump(mode="json") for artifact in artifacts],
+                "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
             },
         )
 
-    def _iter_workspace_files(self) -> list[Path]:
-        files: list[Path] = []
-        for path in self.workspace.root.rglob("*"):
-            if not path.is_file():
-                continue
-            relative_parts = path.relative_to(self.workspace.root).parts
-            if any(part in IGNORED_DIRS for part in relative_parts):
-                continue
-            files.append(path)
-        return sorted(files)
-
-    def _sha256(self, path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as file:
-            for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
-    def _snapshot_path(self, run_id: str, stage: str, phase: str) -> Path:
-        return self.workspace.resolve(f".mas/snapshots/{run_id}/{stage}_{phase}.json")
-
     def _messages_path(self, run_id: str) -> Path:
         return self.workspace.resolve(f".mas/messages/{run_id}.jsonl")
-
-    def _artifacts_dir(self, run_id: str) -> Path:
-        return self.workspace.resolve(f".mas/artifacts/{run_id}")
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
