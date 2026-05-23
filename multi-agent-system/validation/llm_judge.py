@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from workspace import WorkspaceManager
 
 if TYPE_CHECKING:
-    from runner import OpenHandsRunnerConfig
+    from pipeline.runner import OpenHandsRunnerConfig
 
 
 class LLMJudgeResult(BaseModel):

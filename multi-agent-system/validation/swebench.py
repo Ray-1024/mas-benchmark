@@ -8,7 +8,11 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+from artifact import Artifact, ArtifactRegister
+from workspace import WorkspaceManager
 
 
 @dataclass
@@ -24,6 +28,7 @@ class SWEBenchConfig:
     timeout_seconds: int = 7200
     command: str | list[str] | None = None
     output_dir: str | Path = ".mas/swebench"
+    regenerate_predictions: bool = True
 
     @classmethod
     def model_validate(cls, value: Any) -> "SWEBenchConfig":
@@ -52,11 +57,64 @@ class SWEBenchResult:
         return json.dumps(self.model_dump(), indent=indent, ensure_ascii=False)
 
 
+class SWEBenchValidator:
+    def __init__(
+        self,
+        workspace: WorkspaceManager,
+        artifact_register: ArtifactRegister,
+    ) -> None:
+        self.workspace = workspace
+        self.artifact_register = artifact_register
+
+    def validate_stage_artifact(
+        self,
+        stage: Any,
+        artifact: Artifact | None,
+        config: SWEBenchConfig,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {}
+        current_snapshot: Artifact | None = None
+        try:
+            if artifact is not None:
+                details["artifact_id"] = artifact.message_id
+                details["artifact_hash"] = artifact.hash
+                current_snapshot = self.artifact_register.snapshot(
+                    description=(
+                        "temporary snapshot before SWE-Bench validation; "
+                        f"stage={stage.role.value}; artifact={artifact.message_id}"
+                    ),
+                )
+                self.artifact_register.restore(artifact)
+
+            result = SWEBenchRunner(config).run(self.workspace)
+            result_details = result.model_dump(mode="json")
+            result_details.update(details)
+            return {
+                "stage": stage.role.value,
+                "metric": "swebench_resolved",
+                "score": result.score,
+                "status": result.status,
+                "details": result_details,
+            }
+        except Exception as exc:
+            return {
+                "stage": stage.role.value,
+                "metric": "swebench_resolved",
+                "score": None,
+                "status": "error",
+                "details": {**details, "error": str(exc)},
+            }
+        finally:
+            if current_snapshot is not None:
+                self.artifact_register.restore(current_snapshot)
+
+
 class SWEBenchRunner:
     def __init__(self, config: SWEBenchConfig) -> None:
         self.config = config
 
-    def run(self, workspace_root: Path) -> SWEBenchResult:
+    def run(self, workspace: WorkspaceManager | Path) -> SWEBenchResult:
+        workspace_root = workspace.root if isinstance(workspace, WorkspaceManager) else Path(workspace)
         workspace_root = workspace_root.resolve()
         if not self.config.enabled:
             return SWEBenchResult(status="skipped", details={"reason": "SWE-Bench validation is disabled"})
@@ -68,7 +126,7 @@ class SWEBenchRunner:
         run_id = self.config.run_id or f"mas-{self.config.instance_id}"
 
         predictions_path = self._predictions_path(workspace_root, output_dir)
-        if not predictions_path.exists():
+        if self.config.regenerate_predictions or not predictions_path.exists():
             try:
                 prediction_result = self._write_prediction(workspace_root, predictions_path)
                 if prediction_result is not None:
@@ -166,8 +224,8 @@ class SWEBenchRunner:
             raise RuntimeError("SWE-Bench validation requires a git workspace or an existing predictions_path")
 
         parts = [
-            self._git(workspace_root, "diff", "--binary", "HEAD", "--", "."),
-            self._git(workspace_root, "diff", "--cached", "--binary", "HEAD", "--", "."),
+            self._git_diff(workspace_root, "--binary", "HEAD"),
+            self._git_diff(workspace_root, "--cached", "--binary", "HEAD"),
             self._untracked_patch(workspace_root),
         ]
         return "\n".join(part for part in parts if part.strip())
@@ -176,6 +234,8 @@ class SWEBenchRunner:
         files = self._git(workspace_root, "ls-files", "--others", "--exclude-standard").splitlines()
         patches: list[str] = []
         for relative_file in files:
+            if self._is_ignored_workspace_path(relative_file):
+                continue
             path = workspace_root / relative_file
             if not path.is_file() or self._is_binary(path):
                 continue
@@ -282,6 +342,16 @@ class SWEBenchRunner:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
         return completed.stdout
 
+    def _git_diff(self, workspace_root: Path, *args: str) -> str:
+        files = self._git(workspace_root, "diff", "--name-only", *args, "--", ".").splitlines()
+        files = [path for path in files if not self._is_ignored_workspace_path(path)]
+        if not files:
+            return ""
+        return self._git(workspace_root, "diff", *args, "--", *files)
+
+    def _is_ignored_workspace_path(self, relative_path: str) -> bool:
+        return any(part in ArtifactRegister.IGNORED_DIRS for part in Path(relative_path).parts)
+
     def _is_binary(self, path: Path) -> bool:
         return b"\0" in path.read_bytes()[:4096]
 
@@ -297,6 +367,7 @@ def main() -> None:
     parser.add_argument("--run-id")
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=7200)
+    parser.add_argument("--artifact-id", help="Restore and evaluate this ArtifactRegister snapshot before running SWE-Bench.")
     parser.add_argument("--command", help="Optional custom command. Placeholders: {workspace}, {predictions_path}, {instance_id}, {dataset_name}, {split}, {run_id}, {max_workers}.")
     args = parser.parse_args()
 
@@ -312,7 +383,19 @@ def main() -> None:
         timeout_seconds=args.timeout_seconds,
         command=args.command,
     )
-    result = SWEBenchRunner(config).run(args.workspace)
+    workspace = WorkspaceManager(args.workspace)
+    if args.artifact_id:
+        artifact_register = ArtifactRegister(workspace.root)
+        artifact = artifact_register.get(args.artifact_id)
+        stage = SimpleNamespace(role=SimpleNamespace(value="developer"))
+        result = SWEBenchValidator(
+            workspace=workspace,
+            artifact_register=artifact_register,
+        ).validate_stage_artifact(stage=stage, artifact=artifact, config=config)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+
+    result = SWEBenchRunner(config).run(workspace)
     print(result.model_dump_json(indent=2))
 
 

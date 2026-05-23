@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent import AgentRole
+from pipeline.agent import AgentRole
 from workspace import WorkspaceManager
 
 

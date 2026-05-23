@@ -8,12 +8,13 @@ from typing import Any, Callable
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
-from a2a_message import A2AMessage, MessageType
-from agent import AgentDefinition, AgentRole
 from artifact import Artifact, ArtifactRegister
-from runner import OpenhandsRunner
-from stage_validator import StageScore, StageValidator, ValidationScore, ValidationSummary
+from pipeline.a2a_message import A2AMessage, MessageType
+from pipeline.benchmark import ValidationMethodConfig
+from pipeline.runner import OpenhandsRunner
+from pipeline.sdlc import AgentDefinition, AgentRole, DEFAULT_STAGES, PipelineStage, default_agent_definitions
 from tools import new_uuid, utc_now
+from validation.stage_validator import StageScore, StageValidator, ValidationScore, ValidationSummary
 from workspace import WorkspaceManager
 
 
@@ -22,13 +23,6 @@ class PipelineMode(str, Enum):
     MULTI_AGENT_BASELINE = "multi_agent_baseline"
     MULTI_AGENT_WITH_ARTIFACTS = "multi_agent_with_artifacts"
     MULTI_AGENT_WITH_RECOVERY = "multi_agent_with_recovery"
-
-
-class PipelineStage(BaseModel):
-    role: AgentRole
-    prompt: str
-    required_artifacts: list[str] = Field(default_factory=list)
-    expected_artifacts: list[str] = Field(default_factory=list)
 
 
 class PipelineState(BaseModel):
@@ -46,58 +40,6 @@ class PipelineState(BaseModel):
     completed_stages: list[str] = Field(default_factory=list)
 
 
-DEFAULT_STAGES = [
-    PipelineStage(
-        role=AgentRole.REQUIREMENTS_ANALYST,
-        prompt="Analyze the task and produce or update requirements artifacts.",
-        expected_artifacts=["docs/requirements.md"],
-    ),
-    PipelineStage(
-        role=AgentRole.ARCHITECT,
-        prompt="Design the solution architecture using the requirements and workspace context.",
-        required_artifacts=["docs/requirements.md"],
-        expected_artifacts=["docs/architecture.md"],
-    ),
-    PipelineStage(
-        role=AgentRole.IMPLEMENTATION_PLANNER,
-        prompt="Create or update the implementation plan from the requirements and architecture.",
-        required_artifacts=["docs/requirements.md", "docs/architecture.md"],
-        expected_artifacts=["docs/implementation_plan.md"],
-    ),
-    PipelineStage(
-        role=AgentRole.DEVELOPER,
-        prompt="Implement the requested changes according to the available artifacts.",
-        required_artifacts=["docs/implementation_plan.md"],
-    ),
-    PipelineStage(
-        role=AgentRole.TEST_ENGINEER,
-        prompt="Add or update tests and run relevant verification.",
-    ),
-    PipelineStage(
-        role=AgentRole.DEFECT_REPAIRER,
-        prompt="Repair any defects found during testing without reverting unrelated work.",
-    ),
-    PipelineStage(
-        role=AgentRole.RELEASE_MANAGER,
-        prompt="Prepare final delivery artifacts and summarize the completed work.",
-        expected_artifacts=["docs/delivery_report.md", ".mas/artifact_manifest.json"],
-    ),
-]
-
-
-def default_agent_definitions() -> dict[AgentRole, AgentDefinition]:
-    return {
-        role: AgentDefinition(
-            name=role.value,
-            system_prompt=(
-                f"You are the {role.value.replace('_', ' ')} in a multi-agent SDLC pipeline. "
-                "Work only in the provided workspace, respect existing files, and leave concise artifacts."
-            ),
-        )
-        for role in AgentRole
-    }
-
-
 class LangGraphPipeline:
     def __init__(
         self,
@@ -106,6 +48,7 @@ class LangGraphPipeline:
         agents: dict[AgentRole, AgentDefinition] | None = None,
         stages: list[PipelineStage] | None = None,
         validation_references: dict[str, str | Path] | None = None,
+        stage_validations: dict[AgentRole, list[ValidationMethodConfig]] | None = None,
         mode: PipelineMode | str = PipelineMode.MULTI_AGENT_BASELINE,
         single_agent_role: AgentRole = AgentRole.DEVELOPER,
         recovery_threshold: float = 0.8,
@@ -120,11 +63,13 @@ class LangGraphPipeline:
         self.single_agent_role = single_agent_role
         self.recovery_threshold = recovery_threshold
         self.max_restarts = max_restarts
+        self.artifact_register = ArtifactRegister(workspace.root)
         self.stage_validator = StageValidator(
             workspace=workspace,
+            artifact_register=self.artifact_register,
             validation_references=validation_references,
+            stage_validations=stage_validations,
         )
-        self.artifact_register = ArtifactRegister(workspace.root)
         self.sender = sender
         self.app = self._build_graph()
 
@@ -188,7 +133,7 @@ class LangGraphPipeline:
             )
 
             after = self._snapshot_workspace(stage_name, "after", state.run_id, attempt=attempt)
-            validation_scores = self.stage_validator.validate_stage(stage)
+            validation_scores = self.stage_validator.validate_stage(stage, artifact=after)
             self._annotate_scores(validation_scores, attempt)
             stage_score = self.stage_validator.summarize_stage(stage_name, validation_scores)
 

@@ -6,8 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from agent import AgentRole
-from bertscore import BertScoreValidator
+from artifact import Artifact, ArtifactRegister
+from pipeline.agent import AgentRole
+from pipeline.benchmark import ValidationMethod, ValidationMethodConfig
+from validation.bertscore import BertScoreValidator
+from validation.swebench import SWEBenchConfig, SWEBenchValidator
 from workspace import WorkspaceManager
 
 
@@ -49,24 +52,32 @@ class StageValidator:
     def __init__(
         self,
         workspace: WorkspaceManager,
+        artifact_register: ArtifactRegister | None = None,
         validation_references: dict[str, str | Path] | None = None,
+        stage_validations: dict[AgentRole, list[ValidationMethodConfig]] | None = None,
         stage_weights: dict[str, float] | None = None,
     ) -> None:
         self.workspace = workspace
+        self.artifact_register = artifact_register or ArtifactRegister(workspace.root)
         self.validation_references = validation_references or {}
+        self.stage_validations = stage_validations or {}
         self.stage_weights = stage_weights or DEFAULT_STAGE_WEIGHTS
         self.bertscore_validator = BertScoreValidator(
             workspace=workspace,
             validation_references=self.validation_references,
         )
+        self.swebench_validator = SWEBenchValidator(
+            workspace=workspace,
+            artifact_register=self.artifact_register,
+        )
 
-    def validate_stage(self, stage: Any) -> list[ValidationScore]:
-        scores = [self._expected_artifacts_score(stage)]
-        bertscore_score = self.bertscore_validator.validate_stage(stage)
-        if bertscore_score is not None:
-            scores.append(ValidationScore.model_validate(bertscore_score))
-        if stage.role == AgentRole.DEVELOPER:
-            scores.append(self._swebench_score(stage))
+    def validate_stage(self, stage: Any, artifact: Artifact | None = None) -> list[ValidationScore]:
+        methods = self._methods_for_stage(stage)
+        scores: list[ValidationScore] = []
+        for method_config in methods:
+            score = self._validate_with_method(stage, artifact, method_config)
+            if score is not None:
+                scores.append(score)
         return scores
 
     def summarize(self, scores: list[ValidationScore]) -> ValidationSummary:
@@ -196,8 +207,59 @@ class StageValidator:
             details={"present": present, "missing": missing},
         )
 
-    def _swebench_score(self, stage: Any) -> ValidationScore:
-        swebench_config = self.validation_references.get("swebench") or self.validation_references.get("swe_bench")
+    def _methods_for_stage(self, stage: Any) -> list[ValidationMethodConfig]:
+        configured = self.stage_validations.get(stage.role)
+        if configured is not None:
+            return configured
+
+        methods = [ValidationMethodConfig(method=ValidationMethod.EXPECTED_ARTIFACTS)]
+        if stage.role in {
+            AgentRole.REQUIREMENTS_ANALYST,
+            AgentRole.ARCHITECT,
+            AgentRole.IMPLEMENTATION_PLANNER,
+        }:
+            methods.append(ValidationMethodConfig(method=ValidationMethod.BERTSCORE))
+        if stage.role == AgentRole.DEVELOPER:
+            methods.append(ValidationMethodConfig(method=ValidationMethod.SWEBENCH))
+        return methods
+
+    def _validate_with_method(
+        self,
+        stage: Any,
+        artifact: Artifact | None,
+        method_config: ValidationMethodConfig,
+    ) -> ValidationScore | None:
+        if method_config.method == ValidationMethod.EXPECTED_ARTIFACTS:
+            return self._expected_artifacts_score(stage)
+        if method_config.method == ValidationMethod.BERTSCORE:
+            bertscore_score = self.bertscore_validator.validate_stage(stage)
+            return None if bertscore_score is None else ValidationScore.model_validate(bertscore_score)
+        if method_config.method == ValidationMethod.SWEBENCH:
+            return self._swebench_score(stage, artifact, method_config)
+        if method_config.method in {ValidationMethod.LLM_JUDGE, ValidationMethod.LINTER, ValidationMethod.TEST_COVERAGE}:
+            return ValidationScore(
+                stage=stage.role.value,
+                metric=method_config.method.value,
+                score=None,
+                status="skipped",
+                details={"reason": "validation method is configured but not wired into StageValidator yet"},
+            )
+        return ValidationScore(
+            stage=stage.role.value,
+            metric=method_config.method.value,
+            score=None,
+            status="skipped",
+            details={"reason": "unknown validation method"},
+        )
+
+    def _swebench_score(
+        self,
+        stage: Any,
+        artifact: Artifact | None,
+        method_config: ValidationMethodConfig | None = None,
+    ) -> ValidationScore:
+        swebench_config = None if method_config is None else method_config.config
+        swebench_config = swebench_config or self.validation_references.get("swebench") or self.validation_references.get("swe_bench")
         if not swebench_config:
             return ValidationScore(
                 stage=stage.role.value,
@@ -208,17 +270,9 @@ class StageValidator:
             )
 
         try:
-            from swebench import SWEBenchConfig, SWEBenchRunner
-
             config = SWEBenchConfig.model_validate(swebench_config)
-            result = SWEBenchRunner(config).run(self.workspace.root)
-            return ValidationScore(
-                stage=stage.role.value,
-                metric="swebench_resolved",
-                score=result.score,
-                status=result.status,
-                details=result.model_dump(mode="json"),
-            )
+            result = self.swebench_validator.validate_stage_artifact(stage=stage, artifact=artifact, config=config)
+            return ValidationScore.model_validate(result)
         except Exception as exc:
             return ValidationScore(
                 stage=stage.role.value,

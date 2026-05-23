@@ -2,14 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent import AgentDefinition
-
 from pydantic import BaseModel, SecretStr
 
-from openhands.sdk import Agent, Conversation, LLM, Tool
-from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.task_tracker import TaskTrackerTool
-from openhands.tools.terminal import TerminalTool
+from pipeline.agent import AgentDefinition
 
 
 class OpenHandsRunnerConfig(BaseModel):
@@ -26,6 +21,11 @@ class OpenhandsRunner:
         self.workspace_root = workspace_root.resolve()
 
     def run_task(self, role: AgentDefinition, task: str) -> None:
+        from openhands.sdk import Agent, Conversation, LLM, Tool
+        from openhands.tools.file_editor import FileEditorTool
+        from openhands.tools.task_tracker import TaskTrackerTool
+        from openhands.tools.terminal import TerminalTool
+
         llm = LLM(
             model=self.config.model,
             base_url=self.config.base_url,

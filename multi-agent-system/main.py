@@ -77,12 +77,12 @@ def run_benchmark(
     agents: dict[Any, Any],
     runner_config: Any,
 ) -> None:
-    from pipeline import LangGraphPipeline
-    from runner import OpenhandsRunner
+    from pipeline import Benchmark, LangGraphPipeline, OpenhandsRunner
     from tools import new_uuid
     from workspace import WorkspaceManager
 
-    benchmark_id = benchmark["id"]
+    benchmark_model = Benchmark.model_validate(benchmark)
+    benchmark_id = benchmark_model.id
     run_id = args.run_id or f"{benchmark_id}-{new_uuid()}"
     workspace_path = args.workspace or RUN_DIR / benchmark_id / run_id
     prepare_workspace(benchmark_id, workspace_path, explicit_workspace=args.workspace is not None)
@@ -98,6 +98,10 @@ def run_benchmark(
         agents=agents,
         stages=stages,
         validation_references=resolve_reference_files(benchmark),
+        stage_validations={
+            validation.stage: validation.enabled_methods()
+            for validation in benchmark_model.stage_validations
+        },
     )
     state = pipeline.run(task=task, run_id=run_id)
 
@@ -116,8 +120,7 @@ def run_single_agent_brief(
     agents: dict[Any, Any],
     runner_config: Any,
 ) -> None:
-    from agent import AgentRole
-    from runner import OpenhandsRunner
+    from pipeline import AgentRole, OpenhandsRunner
     from tools import new_uuid
     from workspace import WorkspaceManager
 
@@ -146,7 +149,7 @@ def build_runner_config(args: argparse.Namespace) -> Any:
         raise SystemExit("Missing API key. Pass --api-key or set OPENHANDS_API_KEY / OPENAI_API_KEY / LLM_API_KEY.")
 
     from pydantic import SecretStr
-    from runner import OpenHandsRunnerConfig
+    from pipeline import OpenHandsRunnerConfig
 
     return OpenHandsRunnerConfig(
         model=args.model,
@@ -159,8 +162,7 @@ def build_runner_config(args: argparse.Namespace) -> Any:
 
 
 def load_agents(path: Path) -> dict[Any, Any]:
-    from agent import AgentDefinition, AgentRole
-    from pipeline import default_agent_definitions
+    from pipeline import AgentDefinition, AgentRole, default_agent_definitions
 
     agents = default_agent_definitions()
     data = read_json(path, default={"agents": []})
@@ -178,6 +180,8 @@ def load_agents(path: Path) -> dict[Any, Any]:
 
 
 def load_benchmarks(path: Path) -> list[dict[str, Any]]:
+    from pipeline import Benchmark
+
     configured = read_json(path, default={"benchmarks": []}).get("benchmarks", [])
     by_id = {item["id"]: item for item in configured if item.get("id")}
 
@@ -190,7 +194,7 @@ def load_benchmarks(path: Path) -> list[dict[str, Any]]:
                 "reference_response": {},
             },
         )
-    return list(by_id.values())
+    return [Benchmark.model_validate(item).model_dump(mode="python") for item in by_id.values()]
 
 
 def select_benchmarks(benchmarks: list[dict[str, Any]], selected: str) -> list[dict[str, Any]]:
@@ -200,8 +204,7 @@ def select_benchmarks(benchmarks: list[dict[str, Any]], selected: str) -> list[d
 
 
 def select_stages(stage_values: list[str] | None) -> list[Any]:
-    from agent import AgentRole
-    from pipeline import DEFAULT_STAGES
+    from pipeline import AgentRole, DEFAULT_STAGES
 
     if not stage_values:
         return DEFAULT_STAGES
