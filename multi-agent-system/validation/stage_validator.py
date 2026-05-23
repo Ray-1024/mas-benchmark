@@ -6,12 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from artifact import Artifact, ArtifactRegister
 from pipeline.agent import AgentRole
 from pipeline.benchmark import ValidationMethod, ValidationMethodConfig
+from tools import Artifact, ArtifactRegister, WorkspaceManager, markdown_table_cell, score_text
 from validation.bertscore import BertScoreValidator
 from validation.swebench import SWEBenchConfig, SWEBenchValidator
-from workspace import WorkspaceManager
 
 
 DEFAULT_STAGE_WEIGHTS = {
@@ -118,7 +117,7 @@ class StageValidator:
             "",
             f"- Run ID: `{run_id}`",
             f"- Completed stages: {len(completed_stages)}",
-            f"- Weighted score: `{self._score_text(summary.weighted_score)}`",
+            f"- Weighted score: `{score_text(summary.weighted_score)}`",
             "",
             "## Stage Scores",
             "",
@@ -128,11 +127,11 @@ class StageValidator:
         for stage_score in summary.stage_scores:
             lines.append(
                 "| "
-                f"{self._markdown_table_cell(stage_score.stage)} | "
-                f"{self._score_text(stage_score.score)} | "
+                f"{markdown_table_cell(stage_score.stage)} | "
+                f"{score_text(stage_score.score)} | "
                 f"{stage_score.weight:.4f} | "
-                f"{self._score_text(stage_score.weighted_score)} | "
-                f"{self._markdown_table_cell(stage_score.status)} |"
+                f"{score_text(stage_score.weighted_score)} | "
+                f"{markdown_table_cell(stage_score.status)} |"
             )
 
         lines.extend(
@@ -145,13 +144,13 @@ class StageValidator:
             ]
         )
         for score in validation_scores:
-            detail_text = self._markdown_table_cell(json.dumps(score.details, ensure_ascii=False))
+            detail_text = markdown_table_cell(json.dumps(score.details, ensure_ascii=False))
             lines.append(
                 "| "
-                f"{self._markdown_table_cell(score.stage)} | "
-                f"{self._markdown_table_cell(score.metric)} | "
-                f"{self._score_text(score.score)} | "
-                f"{self._markdown_table_cell(score.status)} | "
+                f"{markdown_table_cell(score.stage)} | "
+                f"{markdown_table_cell(score.metric)} | "
+                f"{score_text(score.score)} | "
+                f"{markdown_table_cell(score.status)} | "
                 f"`{detail_text}` |"
             )
 
@@ -161,7 +160,7 @@ class StageValidator:
             description = getattr(artifact, "description", "")
             hash_value = getattr(artifact, "hash", "")
             label = description or artifact_id
-            lines.append(f"- `{self._markdown_table_cell(label)}`: `{artifact_id}` (`{hash_value}`)")
+            lines.append(f"- `{markdown_table_cell(label)}`: `{artifact_id}` (`{hash_value}`)")
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -282,8 +281,3 @@ class StageValidator:
                 details={"error": str(exc)},
             )
 
-    def _score_text(self, score: float | None) -> str:
-        return "n/a" if score is None else f"{score:.4f}"
-
-    def _markdown_table_cell(self, value: str) -> str:
-        return value.replace("|", "\\|").replace("\n", " ")

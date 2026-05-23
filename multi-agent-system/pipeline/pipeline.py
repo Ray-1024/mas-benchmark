@@ -8,14 +8,12 @@ from typing import Any, Callable
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
-from artifact import Artifact, ArtifactRegister
 from pipeline.a2a_message import A2AMessage, MessageType
 from pipeline.benchmark import ValidationMethodConfig
 from pipeline.runner import OpenhandsRunner
 from pipeline.sdlc import AgentDefinition, AgentRole, DEFAULT_STAGES, PipelineStage, default_agent_definitions
-from tools import new_uuid, utc_now
+from tools import Artifact, ArtifactRegister, WorkspaceManager, append_jsonl, new_uuid, utc_now, write_json
 from validation.stage_validator import StageScore, StageValidator, ValidationScore, ValidationSummary
-from workspace import WorkspaceManager
 
 
 class PipelineMode(str, Enum):
@@ -204,7 +202,7 @@ class LangGraphPipeline:
                 "available_artifacts": self._available_artifacts_for_message(state),
             },
         )
-        self._append_jsonl(self._messages_path(state.run_id), message.model_dump(mode="json"))
+        append_jsonl(self._messages_path(state.run_id), message.model_dump(mode="json"))
         return message
 
     def _task_for_stage(
@@ -244,7 +242,7 @@ class LangGraphPipeline:
         artifacts: list[Artifact],
         snapshots: list[Artifact],
     ) -> None:
-        self._write_json(
+        write_json(
             self.workspace.resolve(".mas/artifact_manifest.json"),
             {
                 "run_id": run_id,
@@ -311,16 +309,6 @@ class LangGraphPipeline:
 
     def _messages_path(self, run_id: str) -> Path:
         return self.workspace.resolve(f".mas/messages/{run_id}.jsonl")
-
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(payload, ensure_ascii=False))
-            file.write("\n")
 
     def _node_name(self, index: int, stage: PipelineStage) -> str:
         return f"{index:02d}_{stage.role.value}"

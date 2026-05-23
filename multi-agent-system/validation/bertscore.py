@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.agent import AgentRole
-from workspace import WorkspaceManager
+from tools import WorkspaceManager
 
 
 BERTSCORE_ARTIFACTS = {

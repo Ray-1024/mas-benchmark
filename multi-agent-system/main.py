@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from tools import prepare_workspace_copy, read_json, read_text_input, resolve_project_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -78,8 +77,7 @@ def run_benchmark(
     runner_config: Any,
 ) -> None:
     from pipeline import Benchmark, LangGraphPipeline, OpenhandsRunner
-    from tools import new_uuid
-    from workspace import WorkspaceManager
+    from tools import WorkspaceManager, new_uuid
 
     benchmark_model = Benchmark.model_validate(benchmark)
     benchmark_id = benchmark_model.id
@@ -90,7 +88,7 @@ def run_benchmark(
     workspace = WorkspaceManager(workspace_path)
     runner = OpenhandsRunner(runner_config, workspace.root)
     stages = select_stages(None if args.all_stages else args.stage)
-    task = read_task(args.task, args.task_file) or benchmark_task(benchmark, workspace.root)
+    task = read_text_input(args.task, args.task_file) or benchmark_task(benchmark, workspace.root)
 
     pipeline = LangGraphPipeline(
         runner=runner,
@@ -121,11 +119,10 @@ def run_single_agent_brief(
     runner_config: Any,
 ) -> None:
     from pipeline import AgentRole, OpenhandsRunner
-    from tools import new_uuid
-    from workspace import WorkspaceManager
+    from tools import WorkspaceManager, new_uuid
 
     role = AgentRole(args.brief_agent)
-    brief = read_task(args.brief, args.brief_file) or read_task(args.task, args.task_file)
+    brief = read_text_input(args.brief, args.brief_file) or read_text_input(args.task, args.task_file)
     if not brief:
         raise SystemExit("--brief-agent requires --brief, --brief-file, --task, or --task-file.")
 
@@ -214,18 +211,10 @@ def select_stages(stage_values: list[str] | None) -> list[Any]:
 
 
 def prepare_workspace(benchmark_id: str, workspace_path: Path, explicit_workspace: bool) -> None:
-    if explicit_workspace:
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        return
-
-    source = BENCHMARK_DIR / benchmark_id
-    if not source.exists():
-        raise SystemExit(f"Benchmark workspace does not exist: {source}")
-    if workspace_path.exists():
-        raise SystemExit(f"Run workspace already exists: {workspace_path}")
-
-    workspace_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, workspace_path)
+    try:
+        prepare_workspace_copy(BENCHMARK_DIR / benchmark_id, workspace_path, explicit_workspace=explicit_workspace)
+    except (FileExistsError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def benchmark_task(benchmark: dict[str, Any], workspace_root: Path) -> str:
@@ -247,7 +236,7 @@ def benchmark_task(benchmark: dict[str, Any], workspace_root: Path) -> str:
 def resolve_reference_files(benchmark: dict[str, Any]) -> dict[str, Any]:
     references = benchmark.get("reference_response", {})
     resolved: dict[str, Any] = {
-        key: resolve_project_path(value)
+        key: resolve_project_path(value, PROJECT_ROOT)
         for key, value in references.items()
         if value
     }
@@ -255,33 +244,6 @@ def resolve_reference_files(benchmark: dict[str, Any]) -> dict[str, Any]:
     if swebench_config:
         resolved["swebench"] = swebench_config
     return resolved
-
-
-def resolve_project_path(value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    candidates = [PROJECT_ROOT / path]
-    if path.parts and path.parts[0] == "benchmarks":
-        candidates.append(PROJECT_ROOT / "benchmark" / Path(*path.parts[1:]))
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    return candidates[0].resolve()
-
-
-def read_task(text: str | None, file_path: Path | None) -> str | None:
-    if text:
-        return text
-    if file_path:
-        return file_path.read_text(encoding="utf-8")
-    return None
-
-
-def read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
-    if not path.exists():
-        return default
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

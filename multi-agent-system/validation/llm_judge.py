@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from workspace import WorkspaceManager
+from tools import WorkspaceManager, parse_json_object
 
 if TYPE_CHECKING:
     from pipeline.runner import OpenHandsRunnerConfig
@@ -150,7 +150,7 @@ class LLMJudge:
                     {"role": "user", "content": self._user_prompt(prompt, content)},
                 ]
             )
-            parsed = self._parse_json_response(response_text)
+            parsed = parse_json_object(response_text)
             score = parsed.get("score")
             if score is not None:
                 score = max(0.0, min(1.0, float(score)))
@@ -247,20 +247,6 @@ class LLMJudge:
         if text is not None:
             return str(text)
         return str(choice)
-
-    def _parse_json_response(self, response: str) -> dict[str, Any]:
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            start = response.find("{")
-            end = response.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise ValueError(f"LLM judge response is not JSON: {response}") from None
-            parsed = json.loads(response[start : end + 1])
-
-        if not isinstance(parsed, dict):
-            raise ValueError("LLM judge response must be a JSON object")
-        return parsed
 
     def _resolve_artifact_path(self, artifact_path: str | Path) -> Path:
         path = Path(artifact_path)

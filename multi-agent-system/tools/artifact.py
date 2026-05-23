@@ -8,12 +8,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-import tools
+from tools import utils
 
 
 class Artifact(BaseModel):
-    message_id: str = Field(default_factory=tools.new_id)
-    created_at: datetime = Field(default_factory=tools.utc_now)
+    message_id: str = Field(default_factory=utils.new_id)
+    created_at: datetime = Field(default_factory=utils.utc_now)
     version: int = 1
     workspace_path: Path
     hash: str

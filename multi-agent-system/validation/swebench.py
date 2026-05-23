@@ -11,8 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from artifact import Artifact, ArtifactRegister
-from workspace import WorkspaceManager
+from tools import Artifact, ArtifactRegister, WorkspaceManager, is_binary_file, read_json_or_jsonl
 
 
 @dataclass
@@ -237,7 +236,7 @@ class SWEBenchRunner:
             if self._is_ignored_workspace_path(relative_file):
                 continue
             path = workspace_root / relative_file
-            if not path.is_file() or self._is_binary(path):
+            if not path.is_file() or is_binary_file(path):
                 continue
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
             diff = difflib.unified_diff(
@@ -298,9 +297,7 @@ class SWEBenchRunner:
         return None
 
     def _read_report(self, path: Path) -> Any:
-        if path.suffix == ".jsonl":
-            return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_json_or_jsonl(path)
 
     def _is_resolved(self, report: Any) -> bool:
         if isinstance(report, list):
@@ -351,10 +348,6 @@ class SWEBenchRunner:
 
     def _is_ignored_workspace_path(self, relative_path: str) -> bool:
         return any(part in ArtifactRegister.IGNORED_DIRS for part in Path(relative_path).parts)
-
-    def _is_binary(self, path: Path) -> bool:
-        return b"\0" in path.read_bytes()[:4096]
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run SWE-Bench validation for a workspace patch.")
